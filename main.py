@@ -16,4 +16,13 @@ async def webhook(request: Request):
 
     print("INCOMING:", data)
 
-    return "ok"
+   from fastapi.responses import Response
+
+return Response(
+    content="""
+    <Response>
+        <Message>Got it 👍</Message>
+    </Response>
+    """,
+    media_type="application/xml"
+)
