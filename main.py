@@ -11,7 +11,7 @@ def home():
     return {"status": "running"}
 
 
-# ---- Helper function to save logs ----
+# ---- Helper function ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -36,38 +36,39 @@ async def webhook(request: Request):
 
     print("INCOMING:", data)
 
-num_media = int(data.get("NumMedia", 0))
-body = data.get("Body", "").lower()
+    num_media = int(data.get("NumMedia", 0))
+    body = data.get("Body", "").lower()
 
-# ---- IMAGE CASE ----
-if num_media > 0:
-    image_url = data.get("MediaUrl0")
+    # ---- IMAGE CASE ----
+    if num_media > 0:
+        image_url = data.get("MediaUrl0")
 
-    entry = {
-        "type": "image",
-        "image_url": image_url,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+        entry = {
+            "type": "image",
+            "image_url": image_url,
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
-    save_log(entry)
+        save_log(entry)
 
-    reply = "Photo received. Estimating calories..."
+        reply = "Photo received. Estimating calories..."
 
-# ---- TEXT CASE ----
-elif body:
-    entry = {
-        "type": "text",
-        "text": body,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    # ---- TEXT CASE ----
+    elif body:
+        entry = {
+            "type": "text",
+            "text": body,
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
-    save_log(entry)
+        save_log(entry)
 
-    reply = f"Logged: {body}"
+        reply = f"Logged: {body}"
 
-# ---- EMPTY ----
-else:
-    reply = "Send a meal photo or training log"
+    # ---- EMPTY ----
+    else:
+        reply = "Send a meal photo or training log"
+
     return Response(
         content=f"""
         <Response>
