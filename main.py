@@ -3,10 +3,6 @@ from fastapi.responses import Response
 
 app = FastAPI()
 
-@app.get("/")
-def home():
-    return {"status": "running"}
-
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -17,10 +13,17 @@ async def webhook(request: Request):
 
     print("INCOMING:", data)
 
+    body = data.get("Body", "").lower()
+
+    if body:
+        reply = f"Logged: {body}"
+    else:
+        reply = "Send something to log"
+
     return Response(
-        content="""
+        content=f"""
         <Response>
-            <Message>Got it 👍</Message>
+            <Message>{reply}</Message>
         </Response>
         """,
         media_type="application/xml"
