@@ -1,13 +1,11 @@
-from fastapi import FastAPI, Request
-
-app = FastAPI()
-
-@app.get("/")
-def home():
-    return {"status": "running"}
-
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.form()
-    print(dict(data))
+    try:
+        data = await request.form()
+        data = dict(data)
+    except:
+        data = await request.json()
+
+    print("INCOMING:", data)
+
     return "ok"
