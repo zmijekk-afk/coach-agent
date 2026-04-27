@@ -33,38 +33,45 @@ def save_log(entry):
 
 # ---- AI: estimate calories ----
 def estimate_calories(image_url):
-    # Twilio credentials (needed to access image)
+    import requests
+    import base64
+
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
-    # Download image
+    # Download image from Twilio (authenticated)
     response = requests.get(image_url, auth=(account_sid, auth_token))
 
     if response.status_code != 200:
-        raise Exception("Failed to download image")
+        raise Exception(f"Download failed: {response.status_code}")
 
-    # Convert to base64
-    image_base64 = base64.b64encode(response.content).decode("utf-8")
+    image_bytes = response.content
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    # Convert to data URL (THIS is the key fix)
+    data_url = f"data:image/jpeg;base64,{image_base64}"
 
     # Send to OpenAI
     response = client.responses.create(
         model="gpt-4o-mini",
-        input=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": "Estimate calories of this meal. Format: '~500 kcal (medium confidence)'."
-                },
-                {
-                    "type": "input_image",
-                    "image_base64": image_base64
-                }
-            ]
-        }]
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Estimate calories of this meal. Format: '~500 kcal (medium confidence)'."
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": data_url
+                    }
+                ]
+            }
+        ]
     )
 
-    return response.output_text.strip()
+    return response.output[0].content[0].text
 
 # ---- Webhook ----
 @app.post("/webhook")
