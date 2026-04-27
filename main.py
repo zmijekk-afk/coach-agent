@@ -36,20 +36,38 @@ async def webhook(request: Request):
 
     print("INCOMING:", data)
 
-    body = data.get("Body", "").lower()
+num_media = int(data.get("NumMedia", 0))
+body = data.get("Body", "").lower()
 
-    if body:
-        entry = {
-            "text": body,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+# ---- IMAGE CASE ----
+if num_media > 0:
+    image_url = data.get("MediaUrl0")
 
-        save_log(entry)
+    entry = {
+        "type": "image",
+        "image_url": image_url,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
-        reply = f"Logged: {body}"
-    else:
-        reply = "Send something to log"
+    save_log(entry)
 
+    reply = "Photo received. Estimating calories..."
+
+# ---- TEXT CASE ----
+elif body:
+    entry = {
+        "type": "text",
+        "text": body,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+    save_log(entry)
+
+    reply = f"Logged: {body}"
+
+# ---- EMPTY ----
+else:
+    reply = "Send a meal photo or training log"
     return Response(
         content=f"""
         <Response>
