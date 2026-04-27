@@ -4,7 +4,8 @@ import json
 from datetime import datetime
 import os
 from openai import OpenAI
-
+import requests
+import base64
 app = FastAPI()
 
 # ---- OpenAI client ----
