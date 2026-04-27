@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import Response
 
 app = FastAPI()
 
@@ -16,13 +17,11 @@ async def webhook(request: Request):
 
     print("INCOMING:", data)
 
-   from fastapi.responses import Response
-
-return Response(
-    content="""
-    <Response>
-        <Message>Got it 👍</Message>
-    </Response>
-    """,
-    media_type="application/xml"
-)
+    return Response(
+        content="""
+        <Response>
+            <Message>Got it 👍</Message>
+        </Response>
+        """,
+        media_type="application/xml"
+    )
