@@ -2,8 +2,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import Response
 import json
 from datetime import datetime
+import os
+from openai import OpenAI
 
 app = FastAPI()
+
+# ---- OpenAI client ----
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
 @app.get("/")
@@ -11,7 +16,7 @@ def home():
     return {"status": "running"}
 
 
-# ---- Helper function ----
+# ---- Helper: save logs ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -23,6 +28,28 @@ def save_log(entry):
 
     with open("logs.json", "w") as f:
         json.dump(data, f)
+
+
+# ---- AI: estimate calories ----
+def estimate_calories(image_url):
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": "Estimate calories of this meal. Be concise. Format: '~500 kcal (medium confidence)'."
+                },
+                {
+                    "type": "input_image",
+                    "image_url": image_url
+                }
+            ]
+        }]
+    )
+
+    return response.output_text.strip()
 
 
 # ---- Webhook ----
@@ -51,7 +78,12 @@ async def webhook(request: Request):
 
         save_log(entry)
 
-        reply = "Photo received. Estimating calories..."
+        try:
+            estimate = estimate_calories(image_url)
+            reply = estimate
+        except Exception as e:
+            print("AI ERROR:", e)
+            reply = "Couldn't estimate calories. Try again."
 
     # ---- TEXT CASE ----
     elif body:
