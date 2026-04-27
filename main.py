@@ -32,25 +32,38 @@ def save_log(entry):
 
 # ---- AI: estimate calories ----
 def estimate_calories(image_url):
+    # Twilio credentials (needed to access image)
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+
+    # Download image
+    response = requests.get(image_url, auth=(account_sid, auth_token))
+
+    if response.status_code != 200:
+        raise Exception("Failed to download image")
+
+    # Convert to base64
+    image_base64 = base64.b64encode(response.content).decode("utf-8")
+
+    # Send to OpenAI
     response = client.responses.create(
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         input=[{
             "role": "user",
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Estimate calories of this meal. Be concise. Format: '~500 kcal (medium confidence)'."
+                    "text": "Estimate calories of this meal. Format: '~500 kcal (medium confidence)'."
                 },
                 {
                     "type": "input_image",
-                    "image_url": image_url
+                    "image_base64": image_base64
                 }
             ]
         }]
     )
 
     return response.output_text.strip()
-
 
 # ---- Webhook ----
 @app.post("/webhook")
