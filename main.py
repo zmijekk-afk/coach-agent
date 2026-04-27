@@ -1,3 +1,11 @@
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.get("/")
+def home():
+    return {"status": "running"}
+
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
