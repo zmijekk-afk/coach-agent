@@ -17,6 +17,7 @@ def home():
     return {"status": "running"}
 
 
+# ---- Save logs ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -30,6 +31,7 @@ def save_log(entry):
         json.dump(data, f)
 
 
+# ---- Load logs ----
 def load_logs():
     try:
         with open("logs.json", "r") as f:
@@ -38,6 +40,7 @@ def load_logs():
         return []
 
 
+# ---- Get today's totals ----
 def get_today_totals():
     logs = load_logs()
     today = datetime.now().date()
@@ -62,7 +65,7 @@ def get_today_totals():
     return totals
 
 
-# ✅ FIXED classifier (already working)
+# ---- Detect if message is a question ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -83,30 +86,59 @@ Be liberal: if unsure, answer yes.
     return "yes" in response.output_text.lower()
 
 
-# ✅ REAL query answering
+# ---- FIXED QUERY HANDLER (lists meals properly) ----
 def answer_query(user_text):
     logs = load_logs()
-    recent_logs = logs[-30:]
 
+    today = datetime.now().date()
+    today_meals = []
+
+    # Filter today's meals
+    for entry in logs:
+        if entry.get("type") != "meal":
+            continue
+
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"]).date()
+        except:
+            continue
+
+        if ts == today:
+            today_meals.append(entry)
+
+    if not today_meals:
+        return "No meals logged today."
+
+    # Ask AI to summarize properly
     response = client.responses.create(
         model="gpt-4o-mini",
         input=f"""
 User question:
 {user_text}
 
-Here is their recent tracked data:
-{json.dumps(recent_logs)}
+Meals today:
+{json.dumps(today_meals)}
 
-Instructions:
-- If asking about today → summarize today's meals
-- Include calories total
-- Be concise
+IMPORTANT:
+- ALWAYS list each meal
+- Use bullet points
+- Include estimated calories per meal
+- Then include TOTAL calories
+
+Example:
+- Apple (~95 kcal)
+- Chicken and rice (~500 kcal)
+
+Total: ~595 kcal
+
+Be concise.
 """
     )
 
     return response.output_text.strip()
 
 
+# ---- Clean AI JSON output ----
 def clean_json_output(output_text):
     text = output_text.strip()
 
@@ -120,6 +152,7 @@ def clean_json_output(output_text):
     return text
 
 
+# ---- AI: Estimate calories ----
 def estimate_calories(image_url):
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
@@ -173,6 +206,7 @@ Return ONLY valid JSON:
     return data
 
 
+# ---- Webhook ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
