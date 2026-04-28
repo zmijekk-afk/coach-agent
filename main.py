@@ -6,15 +6,66 @@ import os
 from openai import OpenAI
 import requests
 import base64
+import threading
+import time
 
 app = FastAPI()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# 👉 YOUR WHATSAPP NUMBER (replace this)
+USER_NUMBER = "whatsapp:+48533913613"
+
+TWILIO_NUMBER = "whatsapp:+14155238886"
+
+ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
 
 @app.get("/")
 def home():
     return {"status": "running"}
+
+
+# ---- SEND WHATSAPP MESSAGE ----
+def send_whatsapp_message(body):
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
+
+    data = {
+        "From": TWILIO_NUMBER,
+        "To": USER_NUMBER,
+        "Body": body
+    }
+
+    requests.post(url, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN))
+
+
+# ---- REMINDER LOOP ----
+def reminder_loop():
+    last_sent = None
+
+    while True:
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+
+        # Send at 08:40 once per day
+        if current_time == "08:40":
+            today = now.date()
+
+            if last_sent != today:
+                print("Sending morning reminder...")
+
+                send_whatsapp_message(
+                    "Siema byczq, pamiętaj o foteczkach 📸"
+                )
+
+                last_sent = today
+
+        time.sleep(60)
+
+
+# ---- START BACKGROUND THREAD ----
+threading.Thread(target=reminder_loop, daemon=True).start()
 
 
 # ---- Save logs ----
@@ -31,7 +82,6 @@ def save_log(entry):
         json.dump(data, f)
 
 
-# ---- Load logs ----
 def load_logs():
     try:
         with open("logs.json", "r") as f:
@@ -40,17 +90,11 @@ def load_logs():
         return []
 
 
-# ---- Get today's totals (NOW includes macros properly) ----
 def get_today_totals():
     logs = load_logs()
     today = datetime.now().date()
 
-    totals = {
-        "calories": 0,
-        "protein": 0,
-        "carbs": 0,
-        "fat": 0
-    }
+    totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
     for entry in logs:
         if entry.get("type") != "meal":
@@ -70,7 +114,6 @@ def get_today_totals():
     return totals
 
 
-# ---- Detect question ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -91,7 +134,6 @@ Be liberal: if unsure, answer yes.
     return "yes" in response.output_text.lower()
 
 
-# ---- Answer query (NOW includes macro totals) ----
 def answer_query(user_text):
     logs = load_logs()
     today = datetime.now().date()
@@ -114,12 +156,7 @@ def answer_query(user_text):
         return "No meals logged today."
 
     lines = []
-    total = {
-        "calories": 0,
-        "protein": 0,
-        "carbs": 0,
-        "fat": 0
-    }
+    total = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
     for m in meals:
         name = m.get("name", "Meal")
@@ -135,7 +172,6 @@ def answer_query(user_text):
 
         lines.append(f"- {name} (~{kcal} kcal)")
 
-    # 👉 ADD MACRO TOTALS HERE
     lines.append(
         f"\nTotal: ~{total['calories']} kcal\n"
         f"P: {total['protein']}g | "
@@ -146,7 +182,6 @@ def answer_query(user_text):
     return "\n".join(lines)
 
 
-# ---- Clean JSON ----
 def clean_json_output(output_text):
     text = output_text.strip()
 
@@ -160,17 +195,12 @@ def clean_json_output(output_text):
     return text
 
 
-# ---- AI: estimate calories + name ----
 def estimate_calories(image_url):
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-
-    response = requests.get(image_url, auth=(account_sid, auth_token))
+    response = requests.get(image_url, auth=(ACCOUNT_SID, AUTH_TOKEN))
     if response.status_code != 200:
         raise Exception(f"Download failed: {response.status_code}")
 
-    image_bytes = response.content
-    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+    image_base64 = base64.b64encode(response.content).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{image_base64}"
 
     response = client.responses.create(
@@ -204,18 +234,12 @@ Return ONLY valid JSON:
         ]
     )
 
-    raw_output = response.output[0].content[0].text
-    cleaned = clean_json_output(raw_output)
+    raw = response.output[0].content[0].text
+    cleaned = clean_json_output(raw)
 
-    try:
-        data = json.loads(cleaned)
-    except:
-        raise Exception(f"Bad AI output: {raw_output}")
-
-    return data
+    return json.loads(cleaned)
 
 
-# ---- Webhook ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -224,12 +248,9 @@ async def webhook(request: Request):
     except:
         data = await request.json()
 
-    print("INCOMING:", data)
-
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    # ---- IMAGE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -265,31 +286,21 @@ async def webhook(request: Request):
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
-    # ---- TEXT ----
     elif body:
-        try:
-            if is_question(body):
-                reply = answer_query(body)
-            else:
-                entry = {
-                    "type": "text",
-                    "text": body,
-                    "timestamp": datetime.now().isoformat()
-                }
-                save_log(entry)
-                reply = f"Logged: {body}"
-
-        except Exception as e:
-            reply = f"ERROR: {str(e)}"
+        if is_question(body):
+            reply = answer_query(body)
+        else:
+            save_log({
+                "type": "text",
+                "text": body,
+                "timestamp": datetime.now().isoformat()
+            })
+            reply = f"Logged: {body}"
 
     else:
         reply = "Send a meal photo or ask a question"
 
     return Response(
-        content=f"""
-        <Response>
-            <Message>{reply}</Message>
-        </Response>
-        """,
+        content=f"<Response><Message>{reply}</Message></Response>",
         media_type="application/xml"
     )
