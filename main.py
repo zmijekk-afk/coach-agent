@@ -1,37 +1,49 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
-import json
 from datetime import datetime
 import os
-from openai import OpenAI
-import requests
+import json
 import base64
+import requests
 import psycopg2
+from openai import OpenAI
 
 app = FastAPI()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ---- DATABASE CONNECTION ----
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-cursor = conn.cursor()
 
-# ---- CREATE TABLE (runs once) ----
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS meals (
-    id SERIAL PRIMARY KEY,
-    name TEXT,
-    calories INT,
-    protein FLOAT,
-    carbs FLOAT,
-    fat FLOAT,
-    image_url TEXT,
-    timestamp TIMESTAMP
-)
-""")
-conn.commit()
+# ---- DB CONNECTION (SAFE PER REQUEST) ----
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode="require")
+
+
+# ---- CREATE TABLE (runs on startup) ----
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS meals (
+        id SERIAL PRIMARY KEY,
+        name TEXT,
+        calories INT,
+        protein FLOAT,
+        carbs FLOAT,
+        fat FLOAT,
+        image_url TEXT,
+        timestamp TIMESTAMP
+    )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+init_db()
 
 
 @app.get("/")
@@ -41,7 +53,10 @@ def home():
 
 # ---- SAVE MEAL ----
 def save_meal(entry):
-    cursor.execute("""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
         INSERT INTO meals (name, calories, protein, carbs, fat, image_url, timestamp)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
     """, (
@@ -53,20 +68,29 @@ def save_meal(entry):
         entry["image_url"],
         entry["timestamp"]
     ))
+
     conn.commit()
+    cur.close()
+    conn.close()
 
 
 # ---- LOAD TODAY MEALS ----
 def load_today_meals():
+    conn = get_conn()
+    cur = conn.cursor()
+
     today = datetime.now().date()
 
-    cursor.execute("""
+    cur.execute("""
         SELECT name, calories, protein, carbs, fat, timestamp
         FROM meals
         WHERE DATE(timestamp) = %s
     """, (today,))
 
-    rows = cursor.fetchall()
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
 
     meals = []
     for r in rows:
@@ -104,21 +128,19 @@ def is_question(text):
         input=f"""
 Message: "{text}"
 
-Does this message request information about past meals, calories, or activity?
+Does this message ask about past meals, calories, or activity?
 
-Respond ONLY with:
+Answer ONLY:
 yes
 or
 no
-
-Be liberal: if unsure, answer yes.
 """
     )
 
     return "yes" in response.output_text.lower()
 
 
-# ---- QUERY ANSWER ----
+# ---- ANSWER QUERY ----
 def answer_query(user_text):
     meals = load_today_meals()
 
@@ -137,7 +159,9 @@ def answer_query(user_text):
 
     lines.append(
         f"\nTotal: ~{total['calories']} kcal\n"
-        f"P: {total['protein']}g | C: {total['carbs']}g | F: {total['fat']}g"
+        f"P: {total['protein']}g | "
+        f"C: {total['carbs']}g | "
+        f"F: {total['fat']}g"
     )
 
     return "\n".join(lines)
@@ -146,32 +170,40 @@ def answer_query(user_text):
 # ---- CLEAN JSON ----
 def clean_json_output(text):
     text = text.strip()
+
     if text.startswith("```"):
         text = text.strip("`").replace("json", "").strip()
+
     if text.startswith("json"):
         text = text.replace("json", "", 1).strip()
+
     return text
 
 
-# ---- AI ----
+# ---- AI IMAGE ANALYSIS ----
 def estimate_calories(image_url):
     ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
     AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
     res = requests.get(image_url, auth=(ACCOUNT_SID, AUTH_TOKEN))
-    img_base64 = base64.b64encode(res.content).decode("utf-8")
 
-    data_url = f"data:image/jpeg;base64,{img_base64}"
+    if res.status_code != 200:
+        raise Exception(f"Image download failed: {res.status_code}")
+
+    image_base64 = base64.b64encode(res.content).decode("utf-8")
+    data_url = f"data:image/jpeg;base64,{image_base64}"
 
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[{
             "role": "user",
             "content": [
-                {"type": "input_text", "text": """
-Identify food + estimate nutrition.
+                {
+                    "type": "input_text",
+                    "text": """
+Identify the food and estimate nutrition.
 
-Return JSON:
+Return ONLY JSON:
 {
 "name": "...",
 "calories": number,
@@ -179,28 +211,35 @@ Return JSON:
 "carbs": number,
 "fat": number
 }
-"""},
-                {"type": "input_image", "image_url": data_url}
+"""
+                },
+                {
+                    "type": "input_image",
+                    "image_url": data_url
+                }
             ]
         }]
     )
 
     raw = response.output[0].content[0].text
-    return json.loads(clean_json_output(raw))
+    cleaned = clean_json_output(raw)
+
+    return json.loads(cleaned)
 
 
 # ---- WEBHOOK ----
 @app.post("/webhook")
 async def webhook(request: Request):
-    try:
-        data = await request.form()
-        data = dict(data)
-    except:
-        data = await request.json()
+    # ✅ Twilio sends FORM, not JSON
+    data = await request.form()
+    data = dict(data)
+
+    print("INCOMING:", data)
 
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
+    # ---- IMAGE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -223,22 +262,31 @@ async def webhook(request: Request):
 
             reply = (
                 f"{est['name']} (~{est['calories']} kcal)\n"
-                f"P: {est['protein']}g | C: {est['carbs']}g | F: {est['fat']}g\n\n"
+                f"P: {est['protein']}g | "
+                f"C: {est['carbs']}g | "
+                f"F: {est['fat']}g\n\n"
                 f"Today: {totals['calories']} kcal\n"
-                f"P: {totals['protein']}g | C: {totals['carbs']}g | F: {totals['fat']}g"
+                f"P: {totals['protein']}g | "
+                f"C: {totals['carbs']}g | "
+                f"F: {totals['fat']}g"
             )
 
         except Exception as e:
+            print("AI ERROR:", e)
             reply = f"ERROR: {str(e)}"
 
+    # ---- TEXT ----
     elif body:
-        if is_question(body):
-            reply = answer_query(body)
-        else:
-            reply = "Logged"
+        try:
+            if is_question(body):
+                reply = answer_query(body)
+            else:
+                reply = "Logged"
+        except Exception as e:
+            reply = f"ERROR: {str(e)}"
 
     else:
-        reply = "Send photo or question"
+        reply = "Send meal photo or ask a question"
 
     return Response(
         content=f"<Response><Message>{reply}</Message></Response>",
