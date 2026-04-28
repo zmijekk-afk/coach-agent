@@ -6,20 +6,32 @@ import os
 from openai import OpenAI
 import requests
 import base64
-import threading
-import time
+import psycopg2
 
 app = FastAPI()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 👉 YOUR WHATSAPP NUMBER (replace this)
-USER_NUMBER = "whatsapp:+48533913613"
+# ---- DATABASE CONNECTION ----
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-TWILIO_NUMBER = "whatsapp:+14155238886"
+conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+cursor = conn.cursor()
 
-ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+# ---- CREATE TABLE (runs once) ----
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS meals (
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    calories INT,
+    protein FLOAT,
+    carbs FLOAT,
+    fat FLOAT,
+    image_url TEXT,
+    timestamp TIMESTAMP
+)
+""")
+conn.commit()
 
 
 @app.get("/")
@@ -27,93 +39,65 @@ def home():
     return {"status": "running"}
 
 
-# ---- SEND WHATSAPP MESSAGE ----
-def send_whatsapp_message(body):
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
-
-    data = {
-        "From": TWILIO_NUMBER,
-        "To": USER_NUMBER,
-        "Body": body
-    }
-
-    requests.post(url, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN))
-
-
-# ---- REMINDER LOOP ----
-def reminder_loop():
-    last_sent = None
-
-    while True:
-        now = datetime.now()
-        current_time = now.strftime("%H:%M")
-
-        # Send at 08:40 once per day
-        if current_time == "08:40":
-            today = now.date()
-
-            if last_sent != today:
-                print("Sending morning reminder...")
-
-                send_whatsapp_message(
-                    "Siema byczq, pamiętaj o foteczkach 📸"
-                )
-
-                last_sent = today
-
-        time.sleep(60)
+# ---- SAVE MEAL ----
+def save_meal(entry):
+    cursor.execute("""
+        INSERT INTO meals (name, calories, protein, carbs, fat, image_url, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """, (
+        entry["name"],
+        entry["calories"],
+        entry["protein"],
+        entry["carbs"],
+        entry["fat"],
+        entry["image_url"],
+        entry["timestamp"]
+    ))
+    conn.commit()
 
 
-# ---- START BACKGROUND THREAD ----
-threading.Thread(target=reminder_loop, daemon=True).start()
-
-
-# ---- Save logs ----
-def save_log(entry):
-    try:
-        with open("logs.json", "r") as f:
-            data = json.load(f)
-    except:
-        data = []
-
-    data.append(entry)
-
-    with open("logs.json", "w") as f:
-        json.dump(data, f)
-
-
-def load_logs():
-    try:
-        with open("logs.json", "r") as f:
-            return json.load(f)
-    except:
-        return []
-
-
-def get_today_totals():
-    logs = load_logs()
+# ---- LOAD TODAY MEALS ----
+def load_today_meals():
     today = datetime.now().date()
+
+    cursor.execute("""
+        SELECT name, calories, protein, carbs, fat, timestamp
+        FROM meals
+        WHERE DATE(timestamp) = %s
+    """, (today,))
+
+    rows = cursor.fetchall()
+
+    meals = []
+    for r in rows:
+        meals.append({
+            "name": r[0],
+            "calories": r[1],
+            "protein": r[2],
+            "carbs": r[3],
+            "fat": r[4],
+            "timestamp": r[5].isoformat()
+        })
+
+    return meals
+
+
+# ---- TOTALS ----
+def get_today_totals():
+    meals = load_today_meals()
 
     totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
-    for entry in logs:
-        if entry.get("type") != "meal":
-            continue
-
-        try:
-            ts = datetime.fromisoformat(entry["timestamp"]).date()
-        except:
-            continue
-
-        if ts == today:
-            totals["calories"] += entry.get("calories", 0)
-            totals["protein"] += entry.get("protein", 0)
-            totals["carbs"] += entry.get("carbs", 0)
-            totals["fat"] += entry.get("fat", 0)
+    for m in meals:
+        totals["calories"] += m["calories"]
+        totals["protein"] += m["protein"]
+        totals["carbs"] += m["carbs"]
+        totals["fat"] += m["fat"]
 
     return totals
 
 
+# ---- QUESTION DETECTION ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -134,23 +118,9 @@ Be liberal: if unsure, answer yes.
     return "yes" in response.output_text.lower()
 
 
+# ---- QUERY ANSWER ----
 def answer_query(user_text):
-    logs = load_logs()
-    today = datetime.now().date()
-
-    meals = []
-
-    for entry in logs:
-        if entry.get("type") != "meal":
-            continue
-
-        try:
-            ts = datetime.fromisoformat(entry["timestamp"]).date()
-        except:
-            continue
-
-        if ts == today:
-            meals.append(entry)
+    meals = load_today_meals()
 
     if not meals:
         return "No meals logged today."
@@ -159,87 +129,67 @@ def answer_query(user_text):
     total = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
     for m in meals:
-        name = m.get("name", "Meal")
-        kcal = m.get("calories", 0)
-        protein = m.get("protein", 0)
-        carbs = m.get("carbs", 0)
-        fat = m.get("fat", 0)
-
-        total["calories"] += kcal
-        total["protein"] += protein
-        total["carbs"] += carbs
-        total["fat"] += fat
-
-        lines.append(f"- {name} (~{kcal} kcal)")
+        lines.append(f"- {m['name']} (~{m['calories']} kcal)")
+        total["calories"] += m["calories"]
+        total["protein"] += m["protein"]
+        total["carbs"] += m["carbs"]
+        total["fat"] += m["fat"]
 
     lines.append(
         f"\nTotal: ~{total['calories']} kcal\n"
-        f"P: {total['protein']}g | "
-        f"C: {total['carbs']}g | "
-        f"F: {total['fat']}g"
+        f"P: {total['protein']}g | C: {total['carbs']}g | F: {total['fat']}g"
     )
 
     return "\n".join(lines)
 
 
-def clean_json_output(output_text):
-    text = output_text.strip()
-
+# ---- CLEAN JSON ----
+def clean_json_output(text):
+    text = text.strip()
     if text.startswith("```"):
-        text = text.strip("`")
-        text = text.replace("json", "").strip()
-
+        text = text.strip("`").replace("json", "").strip()
     if text.startswith("json"):
         text = text.replace("json", "", 1).strip()
-
     return text
 
 
+# ---- AI ----
 def estimate_calories(image_url):
-    response = requests.get(image_url, auth=(ACCOUNT_SID, AUTH_TOKEN))
-    if response.status_code != 200:
-        raise Exception(f"Download failed: {response.status_code}")
+    ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+    AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 
-    image_base64 = base64.b64encode(response.content).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{image_base64}"
+    res = requests.get(image_url, auth=(ACCOUNT_SID, AUTH_TOKEN))
+    img_base64 = base64.b64encode(res.content).decode("utf-8")
+
+    data_url = f"data:image/jpeg;base64,{img_base64}"
 
     response = client.responses.create(
         model="gpt-4o-mini",
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": """
-Identify the food and estimate nutrition.
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": """
+Identify food + estimate nutrition.
 
-Return ONLY valid JSON:
+Return JSON:
 {
-  "name": "short food name",
-  "calories": number,
-  "protein": number,
-  "carbs": number,
-  "fat": number,
-  "confidence": "low|medium|high"
+"name": "...",
+"calories": number,
+"protein": number,
+"carbs": number,
+"fat": number
 }
-"""
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": data_url
-                    }
-                ]
-            }
-        ]
+"""},
+                {"type": "input_image", "image_url": data_url}
+            ]
+        }]
     )
 
     raw = response.output[0].content[0].text
-    cleaned = clean_json_output(raw)
-
-    return json.loads(cleaned)
+    return json.loads(clean_json_output(raw))
 
 
+# ---- WEBHOOK ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -255,32 +205,27 @@ async def webhook(request: Request):
         image_url = data.get("MediaUrl0")
 
         try:
-            estimate = estimate_calories(image_url)
+            est = estimate_calories(image_url)
 
             entry = {
-                "type": "meal",
-                "name": estimate.get("name", "Meal"),
+                "name": est["name"],
+                "calories": est["calories"],
+                "protein": est["protein"],
+                "carbs": est["carbs"],
+                "fat": est["fat"],
                 "image_url": image_url,
-                "calories": estimate["calories"],
-                "protein": estimate["protein"],
-                "carbs": estimate["carbs"],
-                "fat": estimate["fat"],
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now()
             }
 
-            save_log(entry)
+            save_meal(entry)
 
             totals = get_today_totals()
 
             reply = (
-                f"{estimate['name']} (~{estimate['calories']} kcal)\n"
-                f"P: {estimate['protein']}g | "
-                f"C: {estimate['carbs']}g | "
-                f"F: {estimate['fat']}g\n\n"
-                f"Today total: {totals['calories']} kcal\n"
-                f"P: {totals['protein']}g | "
-                f"C: {totals['carbs']}g | "
-                f"F: {totals['fat']}g"
+                f"{est['name']} (~{est['calories']} kcal)\n"
+                f"P: {est['protein']}g | C: {est['carbs']}g | F: {est['fat']}g\n\n"
+                f"Today: {totals['calories']} kcal\n"
+                f"P: {totals['protein']}g | C: {totals['carbs']}g | F: {totals['fat']}g"
             )
 
         except Exception as e:
@@ -290,15 +235,10 @@ async def webhook(request: Request):
         if is_question(body):
             reply = answer_query(body)
         else:
-            save_log({
-                "type": "text",
-                "text": body,
-                "timestamp": datetime.now().isoformat()
-            })
-            reply = f"Logged: {body}"
+            reply = "Logged"
 
     else:
-        reply = "Send a meal photo or ask a question"
+        reply = "Send photo or question"
 
     return Response(
         content=f"<Response><Message>{reply}</Message></Response>",
