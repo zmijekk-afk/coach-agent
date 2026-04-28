@@ -62,7 +62,7 @@ def get_today_totals():
     return totals
 
 
-# ---- DEBUG CLASSIFIER ----
+# ✅ FIXED classifier (already working)
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -80,12 +80,10 @@ Be liberal: if unsure, answer yes.
 """
     )
 
-    result = response.output_text.strip().lower()
-    print("CLASSIFIER RESULT:", result)
-
-    return "yes" in result
+    return "yes" in response.output_text.lower()
 
 
+# ✅ REAL query answering
 def answer_query(user_text):
     logs = load_logs()
     recent_logs = logs[-30:]
@@ -101,9 +99,8 @@ Here is their recent tracked data:
 
 Instructions:
 - If asking about today → summarize today's meals
-- If asking about calories → compute totals
-- If asking about food → list meals
-- Keep answer short
+- Include calories total
+- Be concise
 """
     )
 
@@ -189,6 +186,7 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
+    # ---- IMAGE CASE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -221,12 +219,19 @@ async def webhook(request: Request):
             print("AI ERROR:", str(e))
             reply = f"ERROR: {str(e)}"
 
+    # ---- TEXT CASE ----
     elif body:
         try:
-            result = is_question(body)
-
-            # 🔴 DEBUG OUTPUT
-            reply = f"DEBUG → is_question: {result}"
+            if is_question(body):
+                reply = answer_query(body)
+            else:
+                entry = {
+                    "type": "text",
+                    "text": body,
+                    "timestamp": datetime.now().isoformat()
+                }
+                save_log(entry)
+                reply = f"Logged: {body}"
 
         except Exception as e:
             reply = f"ERROR: {str(e)}"
