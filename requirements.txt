@@ -2,4 +2,4 @@ fastapi
 uvicorn
 openai
 requests
-python-multipart
+psycopg2-binary
