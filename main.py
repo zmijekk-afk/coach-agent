@@ -118,9 +118,9 @@ async def webhook(request: Request):
                 f"F: {estimate['fat']}g"
             )
 
-    except Exception as e:
-        print("AI ERROR:", str(e))
-        reply = f"ERROR: {str(e)}"
+        except Exception as e:
+            print("AI ERROR:", str(e))
+            reply = f"ERROR: {str(e)}"
 
     elif body:
         entry = {
