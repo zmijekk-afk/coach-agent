@@ -101,8 +101,12 @@ if num_media > 0:
     image_url = data.get("MediaUrl0")
 
     entry = {
-        "type": "image",
+        "type": "meal",
         "image_url": image_url,
+        "calories": estimate["calories"],
+        "protein": estimate["protein"],
+        "carbs": estimate["carbs"],
+        "fat": estimate["fat"],
         "timestamp": datetime.utcnow().isoformat()
     }
 
