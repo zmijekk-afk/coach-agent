@@ -125,12 +125,8 @@ async def webhook(request: Request):
            
            estimate = estimate_calories(image_url)
 
-reply = (
-    f"{estimate['calories']} kcal\n"
-    f"P: {estimate['protein']}g | "
-    f"C: {estimate['carbs']}g | "
-    f"F: {estimate['fat']}g"
-)
+reply = "NEW MACRO VERSION"
+
         except Exception as e:
             print("AI ERROR:", e)
             reply = "Couldn't estimate calories. Try again."
