@@ -41,7 +41,7 @@ def load_logs():
         return []
 
 
-# ---- Get today's totals ----
+# ---- Get today's totals (still useful for quick replies) ----
 def get_today_totals():
     logs = load_logs()
     today = datetime.now().date()
@@ -66,7 +66,7 @@ def get_today_totals():
     return totals
 
 
-# ---- Detect if message is a question (language-agnostic) ----
+# ---- Detect if message is a question (multilingual) ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -75,7 +75,18 @@ Classify this message:
 
 "{text}"
 
-Is this a question about tracking, calories, nutrition, or history?
+Is the user asking for information, summary, or insight about their past meals, calories, nutrition, or activity?
+
+Examples of YES:
+- how many calories today
+- what did I eat today
+- ile kalorii dzisiaj
+- co dzisiaj jadłem
+
+Examples of NO:
+- chicken and rice
+- gym workout done
+- hello
 
 Answer ONLY:
 yes
@@ -87,17 +98,12 @@ no
     return "yes" in response.output_text.lower()
 
 
-# ---- Answer queries using logs ----
+# ---- Answer query using logs ----
 def answer_query(user_text):
     logs = load_logs()
 
-    # ---- Fast rule-based answers ----
-    if "today" in user_text.lower():
-        totals = get_today_totals()
-        return f"Today: {totals['calories']} kcal"
-
-    # ---- AI fallback with context ----
-    recent_logs = logs[-20:]
+    # limit context size
+    recent_logs = logs[-30:]
 
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -105,10 +111,14 @@ def answer_query(user_text):
 User question:
 {user_text}
 
-Here is recent data:
+Here is their recent tracked data:
 {json.dumps(recent_logs)}
 
-Answer clearly and concisely.
+Instructions:
+- If asking about today → summarize today's meals and calories
+- If asking about food → list meals
+- If asking about calories → compute totals
+- Keep answer short and clear
 """
     )
 
@@ -129,17 +139,17 @@ def clean_json_output(output_text):
     return text
 
 
-# ---- AI: Estimate calories + macros ----
+# ---- AI: Estimate calories ----
 def estimate_calories(image_url):
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
-    # Download image
+    # Download image from Twilio
     response = requests.get(image_url, auth=(account_sid, auth_token))
     if response.status_code != 200:
         raise Exception(f"Download failed: {response.status_code}")
 
-    # Convert to base64
+    # Convert image to base64
     image_bytes = response.content
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{image_base64}"
@@ -235,8 +245,6 @@ async def webhook(request: Request):
 
     # ---- TEXT CASE ----
     elif body:
-
-        # 👉 AI-based intent detection (multilingual)
         try:
             if is_question(body):
                 reply = answer_query(body)
@@ -248,7 +256,6 @@ async def webhook(request: Request):
                 }
                 save_log(entry)
                 reply = f"Logged: {body}"
-
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
