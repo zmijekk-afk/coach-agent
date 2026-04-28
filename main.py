@@ -60,7 +60,20 @@ def estimate_calories(image_url):
                 "content": [
                     {
                         "type": "input_text",
-                        "text": "Estimate calories of this meal. Format: '~500 kcal (medium confidence)'."
+                        "text": """
+Estimate the nutritional content of this meal.
+
+Return ONLY valid JSON in this format:
+{
+  "calories": number,
+  "protein": grams,
+  "carbs": grams,
+  "fat": grams,
+  "confidence": "low|medium|high"
+}
+
+Be concise and realistic. Do not explain.
+"""
                     },
                     {
                         "type": "input_image",
@@ -71,7 +84,16 @@ def estimate_calories(image_url):
         ]
     )
 
-    return response.output[0].content[0].text
+ import json
+
+output_text = response.output[0].content[0].text
+
+try:
+    data = json.loads(output_text)
+except:
+    raise Exception(f"Bad AI output: {output_text}")
+
+return data
 
 # ---- Webhook ----
 @app.post("/webhook")
@@ -100,8 +122,15 @@ async def webhook(request: Request):
         save_log(entry)
 
         try:
-            estimate = estimate_calories(image_url)
-            reply = estimate
+           
+           estimate = estimate_calories(image_url)
+
+reply = (
+    f"{estimate['calories']} kcal\n"
+    f"P: {estimate['protein']}g | "
+    f"C: {estimate['carbs']}g | "
+    f"F: {estimate['fat']}g"
+)
         except Exception as e:
             print("AI ERROR:", e)
             reply = "Couldn't estimate calories. Try again."
