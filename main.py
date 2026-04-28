@@ -6,9 +6,9 @@ import os
 from openai import OpenAI
 import requests
 import base64
+
 app = FastAPI()
 
-# ---- OpenAI client ----
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
@@ -17,7 +17,6 @@ def home():
     return {"status": "running"}
 
 
-# ---- Helper: save logs ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -31,15 +30,10 @@ def save_log(entry):
         json.dump(data, f)
 
 
-# ---- AI: estimate calories ----
 def estimate_calories(image_url):
-    import requests
-    import base64
-
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
-    # Download image from Twilio (authenticated)
     response = requests.get(image_url, auth=(account_sid, auth_token))
 
     if response.status_code != 200:
@@ -48,10 +42,8 @@ def estimate_calories(image_url):
     image_bytes = response.content
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    # Convert to data URL (THIS is the key fix)
     data_url = f"data:image/jpeg;base64,{image_base64}"
 
-    # Send to OpenAI
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[
@@ -63,16 +55,14 @@ def estimate_calories(image_url):
                         "text": """
 Estimate the nutritional content of this meal.
 
-Return ONLY valid JSON in this format:
+Return ONLY valid JSON:
 {
   "calories": number,
-  "protein": grams,
-  "carbs": grams,
-  "fat": grams,
+  "protein": number,
+  "carbs": number,
+  "fat": number,
   "confidence": "low|medium|high"
 }
-
-Be concise and realistic. Do not explain.
 """
                     },
                     {
@@ -84,18 +74,16 @@ Be concise and realistic. Do not explain.
         ]
     )
 
- import json
+    output_text = response.output[0].content[0].text
 
-output_text = response.output[0].content[0].text
+    try:
+        data = json.loads(output_text)
+    except:
+        raise Exception(f"Bad AI output: {output_text}")
 
-try:
-    data = json.loads(output_text)
-except:
-    raise Exception(f"Bad AI output: {output_text}")
+    return data
 
-return data
 
-# ---- Webhook ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -109,7 +97,6 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    # ---- IMAGE CASE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -122,16 +109,19 @@ async def webhook(request: Request):
         save_log(entry)
 
         try:
-           
-           estimate = estimate_calories(image_url)
+            estimate = estimate_calories(image_url)
 
-reply = "NEW MACRO VERSION"
+            reply = (
+                f"{estimate['calories']} kcal\n"
+                f"P: {estimate['protein']}g | "
+                f"C: {estimate['carbs']}g | "
+                f"F: {estimate['fat']}g"
+            )
 
         except Exception as e:
             print("AI ERROR:", e)
-            reply = "Couldn't estimate calories. Try again."
+            reply = "Couldn't estimate calories."
 
-    # ---- TEXT CASE ----
     elif body:
         entry = {
             "type": "text",
@@ -143,7 +133,6 @@ reply = "NEW MACRO VERSION"
 
         reply = f"Logged: {body}"
 
-    # ---- EMPTY ----
     else:
         reply = "Send a meal photo or training log"
 
