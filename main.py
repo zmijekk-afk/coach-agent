@@ -12,13 +12,11 @@ app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-# ---- Health check ----
 @app.get("/")
 def home():
     return {"status": "running"}
 
 
-# ---- Save logs ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -32,7 +30,6 @@ def save_log(entry):
         json.dump(data, f)
 
 
-# ---- Load logs ----
 def load_logs():
     try:
         with open("logs.json", "r") as f:
@@ -41,7 +38,6 @@ def load_logs():
         return []
 
 
-# ---- Get today's totals (still useful for quick replies) ----
 def get_today_totals():
     logs = load_logs()
     today = datetime.now().date()
@@ -66,43 +62,32 @@ def get_today_totals():
     return totals
 
 
-# ---- Detect if message is a question (multilingual) ----
+# ---- DEBUG CLASSIFIER ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
         input=f"""
-Classify this message:
+Message: "{text}"
 
-"{text}"
+Does this message request information about past meals, calories, or activity?
 
-Is the user asking for information, summary, or insight about their past meals, calories, nutrition, or activity?
-
-Examples of YES:
-- how many calories today
-- what did I eat today
-- ile kalorii dzisiaj
-- co dzisiaj jadłem
-
-Examples of NO:
-- chicken and rice
-- gym workout done
-- hello
-
-Answer ONLY:
+Respond ONLY with:
 yes
 or
 no
+
+Be liberal: if unsure, answer yes.
 """
     )
 
-    return "yes" in response.output_text.lower()
+    result = response.output_text.strip().lower()
+    print("CLASSIFIER RESULT:", result)
+
+    return "yes" in result
 
 
-# ---- Answer query using logs ----
 def answer_query(user_text):
     logs = load_logs()
-
-    # limit context size
     recent_logs = logs[-30:]
 
     response = client.responses.create(
@@ -115,17 +100,16 @@ Here is their recent tracked data:
 {json.dumps(recent_logs)}
 
 Instructions:
-- If asking about today → summarize today's meals and calories
-- If asking about food → list meals
+- If asking about today → summarize today's meals
 - If asking about calories → compute totals
-- Keep answer short and clear
+- If asking about food → list meals
+- Keep answer short
 """
     )
 
     return response.output_text.strip()
 
 
-# ---- Clean AI JSON output ----
 def clean_json_output(output_text):
     text = output_text.strip()
 
@@ -139,22 +123,18 @@ def clean_json_output(output_text):
     return text
 
 
-# ---- AI: Estimate calories ----
 def estimate_calories(image_url):
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
-    # Download image from Twilio
     response = requests.get(image_url, auth=(account_sid, auth_token))
     if response.status_code != 200:
         raise Exception(f"Download failed: {response.status_code}")
 
-    # Convert image to base64
     image_bytes = response.content
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{image_base64}"
 
-    # Send to OpenAI
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[
@@ -196,7 +176,6 @@ Return ONLY valid JSON:
     return data
 
 
-# ---- Webhook ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -210,7 +189,6 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    # ---- IMAGE CASE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -243,19 +221,13 @@ async def webhook(request: Request):
             print("AI ERROR:", str(e))
             reply = f"ERROR: {str(e)}"
 
-    # ---- TEXT CASE ----
     elif body:
         try:
-            if is_question(body):
-                reply = answer_query(body)
-            else:
-                entry = {
-                    "type": "text",
-                    "text": body,
-                    "timestamp": datetime.now().isoformat()
-                }
-                save_log(entry)
-                reply = f"Logged: {body}"
+            result = is_question(body)
+
+            # 🔴 DEBUG OUTPUT
+            reply = f"DEBUG → is_question: {result}"
+
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
