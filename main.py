@@ -97,30 +97,30 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    if num_media > 0:
-        image_url = data.get("MediaUrl0")
+if num_media > 0:
+    image_url = data.get("MediaUrl0")
 
-        entry = {
-            "type": "image",
-            "image_url": image_url,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+    entry = {
+        "type": "image",
+        "image_url": image_url,
+        "timestamp": datetime.utcnow().isoformat()
+    }
 
-        save_log(entry)
+    save_log(entry)
 
-        try:
-            estimate = estimate_calories(image_url)
+    try:
+        estimate = estimate_calories(image_url)
 
-            reply = (
-                f"{estimate['calories']} kcal\n"
-                f"P: {estimate['protein']}g | "
-                f"C: {estimate['carbs']}g | "
-                f"F: {estimate['fat']}g"
-            )
+        reply = (
+            f"{estimate['calories']} kcal\n"
+            f"P: {estimate['protein']}g | "
+            f"C: {estimate['carbs']}g | "
+            f"F: {estimate['fat']}g"
+        )
 
-        except Exception as e:
-            print("AI ERROR:", str(e))
-            reply = f"ERROR: {str(e)}"
+    except Exception as e:
+        print("AI ERROR:", str(e))
+        reply = f"ERROR: {str(e)}"
 
     elif body:
         entry = {
