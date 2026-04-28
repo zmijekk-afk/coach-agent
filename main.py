@@ -17,7 +17,6 @@ def home():
     return {"status": "running"}
 
 
-# ---- Save logs ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -31,7 +30,6 @@ def save_log(entry):
         json.dump(data, f)
 
 
-# ---- Load logs ----
 def load_logs():
     try:
         with open("logs.json", "r") as f:
@@ -40,7 +38,6 @@ def load_logs():
         return []
 
 
-# ---- Get today's totals ----
 def get_today_totals():
     logs = load_logs()
     today = datetime.now().date()
@@ -65,7 +62,6 @@ def get_today_totals():
     return totals
 
 
-# ---- Detect if message is a question ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -86,14 +82,13 @@ Be liberal: if unsure, answer yes.
     return "yes" in response.output_text.lower()
 
 
-# ---- FIXED QUERY HANDLER (lists meals properly) ----
+# ---- UPDATED QUERY (uses stored names) ----
 def answer_query(user_text):
     logs = load_logs()
-
     today = datetime.now().date()
-    today_meals = []
 
-    # Filter today's meals
+    meals = []
+
     for entry in logs:
         if entry.get("type") != "meal":
             continue
@@ -104,41 +99,25 @@ def answer_query(user_text):
             continue
 
         if ts == today:
-            today_meals.append(entry)
+            meals.append(entry)
 
-    if not today_meals:
+    if not meals:
         return "No meals logged today."
 
-    # Ask AI to summarize properly
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=f"""
-User question:
-{user_text}
+    lines = []
+    total = 0
 
-Meals today:
-{json.dumps(today_meals)}
+    for m in meals:
+        name = m.get("name", "Meal")
+        kcal = m.get("calories", 0)
+        total += kcal
+        lines.append(f"- {name} (~{kcal} kcal)")
 
-IMPORTANT:
-- ALWAYS list each meal
-- Use bullet points
-- Include estimated calories per meal
-- Then include TOTAL calories
+    lines.append(f"\nTotal: ~{total} kcal")
 
-Example:
-- Apple (~95 kcal)
-- Chicken and rice (~500 kcal)
-
-Total: ~595 kcal
-
-Be concise.
-"""
-    )
-
-    return response.output_text.strip()
+    return "\n".join(lines)
 
 
-# ---- Clean AI JSON output ----
 def clean_json_output(output_text):
     text = output_text.strip()
 
@@ -152,7 +131,7 @@ def clean_json_output(output_text):
     return text
 
 
-# ---- AI: Estimate calories ----
+# ---- UPDATED AI (adds name) ----
 def estimate_calories(image_url):
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
@@ -174,10 +153,11 @@ def estimate_calories(image_url):
                     {
                         "type": "input_text",
                         "text": """
-Estimate the nutritional content of this meal.
+Identify the food and estimate nutrition.
 
 Return ONLY valid JSON:
 {
+  "name": "short food name",
   "calories": number,
   "protein": number,
   "carbs": number,
@@ -206,7 +186,6 @@ Return ONLY valid JSON:
     return data
 
 
-# ---- Webhook ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -220,7 +199,7 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    # ---- IMAGE CASE ----
+    # ---- IMAGE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -229,6 +208,7 @@ async def webhook(request: Request):
 
             entry = {
                 "type": "meal",
+                "name": estimate.get("name", "Meal"),
                 "image_url": image_url,
                 "calories": estimate["calories"],
                 "protein": estimate["protein"],
@@ -242,7 +222,7 @@ async def webhook(request: Request):
             totals = get_today_totals()
 
             reply = (
-                f"{estimate['calories']} kcal\n"
+                f"{estimate['name']} (~{estimate['calories']} kcal)\n"
                 f"P: {estimate['protein']}g | "
                 f"C: {estimate['carbs']}g | "
                 f"F: {estimate['fat']}g\n\n"
@@ -250,10 +230,9 @@ async def webhook(request: Request):
             )
 
         except Exception as e:
-            print("AI ERROR:", str(e))
             reply = f"ERROR: {str(e)}"
 
-    # ---- TEXT CASE ----
+    # ---- TEXT ----
     elif body:
         try:
             if is_question(body):
