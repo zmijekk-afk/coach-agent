@@ -12,6 +12,7 @@ app = FastAPI()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+# ---- Health check ----
 @app.get("/")
 def home():
     return {"status": "running"}
@@ -31,19 +32,23 @@ def save_log(entry):
         json.dump(data, f)
 
 
-# ---- Get today's totals ----
-def get_today_totals():
+# ---- Load logs ----
+def load_logs():
     try:
         with open("logs.json", "r") as f:
-            data = json.load(f)
+            return json.load(f)
     except:
-        return {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+        return []
 
+
+# ---- Get today's totals ----
+def get_today_totals():
+    logs = load_logs()
     today = datetime.now().date()
 
     totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
-    for entry in data:
+    for entry in logs:
         if entry.get("type") != "meal":
             continue
 
@@ -61,7 +66,56 @@ def get_today_totals():
     return totals
 
 
-# ---- Clean AI output ----
+# ---- Detect if message is a question (language-agnostic) ----
+def is_question(text):
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=f"""
+Classify this message:
+
+"{text}"
+
+Is this a question about tracking, calories, nutrition, or history?
+
+Answer ONLY:
+yes
+or
+no
+"""
+    )
+
+    return "yes" in response.output_text.lower()
+
+
+# ---- Answer queries using logs ----
+def answer_query(user_text):
+    logs = load_logs()
+
+    # ---- Fast rule-based answers ----
+    if "today" in user_text.lower():
+        totals = get_today_totals()
+        return f"Today: {totals['calories']} kcal"
+
+    # ---- AI fallback with context ----
+    recent_logs = logs[-20:]
+
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=f"""
+User question:
+{user_text}
+
+Here is recent data:
+{json.dumps(recent_logs)}
+
+Answer clearly and concisely.
+"""
+    )
+
+    return response.output_text.strip()
+
+
+# ---- Clean AI JSON output ----
 def clean_json_output(output_text):
     text = output_text.strip()
 
@@ -75,19 +129,22 @@ def clean_json_output(output_text):
     return text
 
 
-# ---- AI estimation ----
+# ---- AI: Estimate calories + macros ----
 def estimate_calories(image_url):
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
 
+    # Download image
     response = requests.get(image_url, auth=(account_sid, auth_token))
     if response.status_code != 200:
         raise Exception(f"Download failed: {response.status_code}")
 
+    # Convert to base64
     image_bytes = response.content
     image_base64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{image_base64}"
 
+    # Send to OpenAI
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[
@@ -157,7 +214,7 @@ async def webhook(request: Request):
                 "protein": estimate["protein"],
                 "carbs": estimate["carbs"],
                 "fat": estimate["fat"],
-                "timestamp": datetime.now().isoformat()  # FIXED HERE
+                "timestamp": datetime.now().isoformat()
             }
 
             save_log(entry)
@@ -178,18 +235,25 @@ async def webhook(request: Request):
 
     # ---- TEXT CASE ----
     elif body:
-        entry = {
-            "type": "text",
-            "text": body,
-            "timestamp": datetime.now().isoformat()
-        }
 
-        save_log(entry)
+        # 👉 AI-based intent detection (multilingual)
+        try:
+            if is_question(body):
+                reply = answer_query(body)
+            else:
+                entry = {
+                    "type": "text",
+                    "text": body,
+                    "timestamp": datetime.now().isoformat()
+                }
+                save_log(entry)
+                reply = f"Logged: {body}"
 
-        reply = f"Logged: {body}"
+        except Exception as e:
+            reply = f"ERROR: {str(e)}"
 
     else:
-        reply = "Send a meal photo or training log"
+        reply = "Send a meal photo or ask a question"
 
     return Response(
         content=f"""
