@@ -17,6 +17,7 @@ def home():
     return {"status": "running"}
 
 
+# ---- Save logs ----
 def save_log(entry):
     try:
         with open("logs.json", "r") as f:
@@ -30,6 +31,7 @@ def save_log(entry):
         json.dump(data, f)
 
 
+# ---- Load logs ----
 def load_logs():
     try:
         with open("logs.json", "r") as f:
@@ -38,11 +40,17 @@ def load_logs():
         return []
 
 
+# ---- Get today's totals (NOW includes macros properly) ----
 def get_today_totals():
     logs = load_logs()
     today = datetime.now().date()
 
-    totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+    totals = {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0
+    }
 
     for entry in logs:
         if entry.get("type") != "meal":
@@ -62,6 +70,7 @@ def get_today_totals():
     return totals
 
 
+# ---- Detect question ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
@@ -82,7 +91,7 @@ Be liberal: if unsure, answer yes.
     return "yes" in response.output_text.lower()
 
 
-# ---- UPDATED QUERY (uses stored names) ----
+# ---- Answer query (NOW includes macro totals) ----
 def answer_query(user_text):
     logs = load_logs()
     today = datetime.now().date()
@@ -105,19 +114,39 @@ def answer_query(user_text):
         return "No meals logged today."
 
     lines = []
-    total = 0
+    total = {
+        "calories": 0,
+        "protein": 0,
+        "carbs": 0,
+        "fat": 0
+    }
 
     for m in meals:
         name = m.get("name", "Meal")
         kcal = m.get("calories", 0)
-        total += kcal
+        protein = m.get("protein", 0)
+        carbs = m.get("carbs", 0)
+        fat = m.get("fat", 0)
+
+        total["calories"] += kcal
+        total["protein"] += protein
+        total["carbs"] += carbs
+        total["fat"] += fat
+
         lines.append(f"- {name} (~{kcal} kcal)")
 
-    lines.append(f"\nTotal: ~{total} kcal")
+    # 👉 ADD MACRO TOTALS HERE
+    lines.append(
+        f"\nTotal: ~{total['calories']} kcal\n"
+        f"P: {total['protein']}g | "
+        f"C: {total['carbs']}g | "
+        f"F: {total['fat']}g"
+    )
 
     return "\n".join(lines)
 
 
+# ---- Clean JSON ----
 def clean_json_output(output_text):
     text = output_text.strip()
 
@@ -131,7 +160,7 @@ def clean_json_output(output_text):
     return text
 
 
-# ---- UPDATED AI (adds name) ----
+# ---- AI: estimate calories + name ----
 def estimate_calories(image_url):
     account_sid = os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
@@ -186,6 +215,7 @@ Return ONLY valid JSON:
     return data
 
 
+# ---- Webhook ----
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -226,7 +256,10 @@ async def webhook(request: Request):
                 f"P: {estimate['protein']}g | "
                 f"C: {estimate['carbs']}g | "
                 f"F: {estimate['fat']}g\n\n"
-                f"Today total: {totals['calories']} kcal"
+                f"Today total: {totals['calories']} kcal\n"
+                f"P: {totals['protein']}g | "
+                f"C: {totals['carbs']}g | "
+                f"F: {totals['fat']}g"
             )
 
         except Exception as e:
