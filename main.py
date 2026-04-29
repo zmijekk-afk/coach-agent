@@ -11,23 +11,32 @@ from openai import OpenAI
 app = FastAPI()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
-# ---- DB CONNECTION ----
+# ---------------- DB ----------------
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
-# ---- INIT TABLE ----
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    # USERS
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        phone_number TEXT UNIQUE,
+        created_at TIMESTAMP
+    )
+    """)
+
+    # MEALS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS meals (
         id SERIAL PRIMARY KEY,
+        user_id INT,
         name TEXT,
         calories INT,
         protein FLOAT,
@@ -46,41 +55,39 @@ def init_db():
 init_db()
 
 
-@app.get("/")
-def home():
-    return {"status": "running"}
+# ---------------- USER ----------------
+def get_or_create_user(phone):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM users WHERE phone_number=%s", (phone,))
+    row = cur.fetchone()
+
+    if row:
+        user_id = row[0]
+    else:
+        cur.execute(
+            "INSERT INTO users (phone_number, created_at) VALUES (%s, %s) RETURNING id",
+            (phone, datetime.now())
+        )
+        user_id = cur.fetchone()[0]
+        conn.commit()
+
+    cur.close()
+    conn.close()
+    return user_id
 
 
-# =====================================================
-# 🔥 NEW: REMINDER ENDPOINT (CALLED BY CRON)
-# =====================================================
-@app.get("/send-reminder")
-def send_reminder():
-    ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-    AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
-
-    data = {
-        "From": "whatsapp:+14155238886",
-        "To": "whatsapp:+48533913613",  # your number
-        "Body": "Siema byczq, pamiętaj o foteczkach 📸"
-    }
-
-    requests.post(url, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN))
-
-    return {"status": "reminder sent"}
-
-
-# ---- SAVE MEAL ----
-def save_meal(entry):
+# ---------------- SAVE MEAL ----------------
+def save_meal(user_id, entry):
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO meals (name, calories, protein, carbs, fat, image_url, timestamp)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO meals (user_id, name, calories, protein, carbs, fat, image_url, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """, (
+        user_id,
         entry["name"],
         entry["calories"],
         entry["protein"],
@@ -95,18 +102,18 @@ def save_meal(entry):
     conn.close()
 
 
-# ---- LOAD TODAY ----
-def load_today_meals():
+# ---------------- LOAD TODAY ----------------
+def load_today_meals(user_id):
     conn = get_conn()
     cur = conn.cursor()
 
     today = datetime.now().date()
 
     cur.execute("""
-        SELECT name, calories, protein, carbs, fat, timestamp
+        SELECT name, calories, protein, carbs, fat
         FROM meals
-        WHERE DATE(timestamp) = %s
-    """, (today,))
+        WHERE user_id=%s AND DATE(timestamp)=%s
+    """, (user_id, today))
 
     rows = cur.fetchall()
 
@@ -119,16 +126,15 @@ def load_today_meals():
             "calories": r[1],
             "protein": r[2],
             "carbs": r[3],
-            "fat": r[4],
-            "timestamp": r[5].isoformat()
+            "fat": r[4]
         }
         for r in rows
     ]
 
 
-# ---- TOTALS ----
-def get_today_totals():
-    meals = load_today_meals()
+# ---------------- TOTALS ----------------
+def get_today_totals(user_id):
+    meals = load_today_meals(user_id)
 
     totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
@@ -141,86 +147,57 @@ def get_today_totals():
     return totals
 
 
-# ---- AI: detect question ----
-def is_question(text):
-    response = client.responses.create(
-        model="gpt-4o-mini",
-        input=f"""
-Message: "{text}"
-
-Does this ask about past meals, calories, or activity?
-
-Answer only:
-yes
-or
-no
-"""
-    )
-    return "yes" in response.output_text.lower()
-
-
-# ---- ANSWER QUERY ----
-def answer_query(user_text):
-    meals = load_today_meals()
+# ---------------- QUERY ----------------
+def answer_query(user_id):
+    meals = load_today_meals(user_id)
 
     if not meals:
         return "No meals logged today."
 
     lines = []
-    total = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+    totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
 
     for m in meals:
         lines.append(f"- {m['name']} (~{m['calories']} kcal)")
-        total["calories"] += m["calories"]
-        total["protein"] += m["protein"]
-        total["carbs"] += m["carbs"]
-        total["fat"] += m["fat"]
+        totals["calories"] += m["calories"]
+        totals["protein"] += m["protein"]
+        totals["carbs"] += m["carbs"]
+        totals["fat"] += m["fat"]
 
     lines.append(
-        f"\nTotal: ~{total['calories']} kcal\n"
-        f"P: {total['protein']}g | C: {total['carbs']}g | F: {total['fat']}g"
+        f"\nTotal: {totals['calories']} kcal\n"
+        f"P: {totals['protein']}g | C: {totals['carbs']}g | F: {totals['fat']}g"
     )
 
     return "\n".join(lines)
 
 
-# ---- CLEAN JSON ----
-def clean_json_output(text):
+# ---------------- AI ----------------
+def clean_json(text):
     text = text.strip()
-
     if text.startswith("```"):
         text = text.strip("`").replace("json", "").strip()
-
-    if text.startswith("json"):
-        text = text.replace("json", "", 1).strip()
-
     return text
 
 
-# ---- AI: IMAGE → NUTRITION ----
 def estimate_calories(image_url):
-    ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-    AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
 
-    res = requests.get(image_url, auth=(ACCOUNT_SID, AUTH_TOKEN))
+    res = requests.get(image_url, auth=(sid, token))
+    img64 = base64.b64encode(res.content).decode()
 
-    if res.status_code != 200:
-        raise Exception(f"Image download failed: {res.status_code}")
-
-    image_base64 = base64.b64encode(res.content).decode("utf-8")
-    data_url = f"data:image/jpeg;base64,{image_base64}"
+    data_url = f"data:image/jpeg;base64,{img64}"
 
     response = client.responses.create(
         model="gpt-4o-mini",
         input=[{
             "role": "user",
             "content": [
-                {
-                    "type": "input_text",
-                    "text": """
-Identify the food and estimate nutrition.
+                {"type": "input_text", "text": """
+Identify food + estimate nutrition.
 
-Return ONLY JSON:
+Return JSON:
 {
 "name": "...",
 "calories": number,
@@ -228,29 +205,53 @@ Return ONLY JSON:
 "carbs": number,
 "fat": number
 }
-"""
-                },
-                {
-                    "type": "input_image",
-                    "image_url": data_url
-                }
+"""},
+                {"type": "input_image", "image_url": data_url}
             ]
         }]
     )
 
     raw = response.output[0].content[0].text
-    cleaned = clean_json_output(raw)
-
-    return json.loads(cleaned)
+    return json.loads(clean_json(raw))
 
 
-# ---- WEBHOOK ----
+# ---------------- REMINDER ----------------
+@app.get("/send-reminder")
+def send_reminder():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT phone_number FROM users")
+    users = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+
+    for (phone,) in users:
+        requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            data={
+                "From": "whatsapp:+14155238886",
+                "To": phone,
+                "Body": "Siema byczq, pamiętaj o foteczkach 📸"
+            },
+            auth=(sid, token)
+        )
+
+    return {"status": f"sent to {len(users)} users"}
+
+
+# ---------------- WEBHOOK ----------------
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.form()
     data = dict(data)
 
-    print("INCOMING:", data)
+    phone = data.get("From")  # 👈 KEY CHANGE
+    user_id = get_or_create_user(phone)
 
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
@@ -261,7 +262,7 @@ async def webhook(request: Request):
         try:
             est = estimate_calories(image_url)
 
-            entry = {
+            save_meal(user_id, {
                 "name": est["name"],
                 "calories": est["calories"],
                 "protein": est["protein"],
@@ -269,38 +270,24 @@ async def webhook(request: Request):
                 "fat": est["fat"],
                 "image_url": image_url,
                 "timestamp": datetime.now()
-            }
+            })
 
-            save_meal(entry)
-
-            totals = get_today_totals()
+            totals = get_today_totals(user_id)
 
             reply = (
                 f"{est['name']} (~{est['calories']} kcal)\n"
-                f"P: {est['protein']}g | "
-                f"C: {est['carbs']}g | "
-                f"F: {est['fat']}g\n\n"
-                f"Today: {totals['calories']} kcal\n"
-                f"P: {totals['protein']}g | "
-                f"C: {totals['carbs']}g | "
-                f"F: {totals['fat']}g"
+                f"P: {est['protein']}g | C: {est['carbs']}g | F: {est['fat']}g\n\n"
+                f"Today: {totals['calories']} kcal"
             )
 
         except Exception as e:
-            print("AI ERROR:", e)
             reply = f"ERROR: {str(e)}"
 
     elif body:
-        try:
-            if is_question(body):
-                reply = answer_query(body)
-            else:
-                reply = "Logged"
-        except Exception as e:
-            reply = f"ERROR: {str(e)}"
+        reply = answer_query(user_id)
 
     else:
-        reply = "Send meal photo or ask a question"
+        reply = "Send photo or ask question"
 
     return Response(
         content=f"<Response><Message>{reply}</Message></Response>",
