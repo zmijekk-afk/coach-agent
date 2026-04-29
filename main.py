@@ -47,6 +47,16 @@ def init_db():
     )
     """)
 
+    # LOGS (for counting activity)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS logs (
+        id SERIAL PRIMARY KEY,
+        user_id INT,
+        type TEXT,
+        timestamp TIMESTAMP
+    )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -78,7 +88,7 @@ def get_or_create_user(phone):
     return user_id
 
 
-# ---------------- SAVE MEAL ----------------
+# ---------------- SAVE ----------------
 def save_meal(user_id, entry):
     conn = get_conn()
     cur = conn.cursor()
@@ -102,7 +112,21 @@ def save_meal(user_id, entry):
     conn.close()
 
 
-# ---------------- LOAD TODAY ----------------
+def save_log(user_id, log_type):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO logs (user_id, type, timestamp)
+        VALUES (%s, %s, %s)
+    """, (user_id, log_type, datetime.now()))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ---------------- LOAD ----------------
 def load_today_meals(user_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -132,7 +156,6 @@ def load_today_meals(user_id):
     ]
 
 
-# ---------------- TOTALS ----------------
 def get_today_totals(user_id):
     meals = load_today_meals(user_id)
 
@@ -206,7 +229,8 @@ Return JSON:
 "fat": number
 }
 """},
-                {"type": "input_image", "image_url": data_url}
+                {"type": "input_image",
+                 "image_url": data_url}
             ]
         }]
     )
@@ -244,13 +268,83 @@ def send_reminder():
     return {"status": f"sent to {len(users)} users"}
 
 
+# ---------------- DAILY SUMMARY ----------------
+def build_daily_summary():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    today = datetime.now().date()
+
+    cur.execute("SELECT id, phone_number FROM users")
+    users = cur.fetchall()
+
+    lines = ["📊 Daily summary:\n"]
+
+    for user_id, phone in users:
+
+        # Count logs
+        cur.execute("""
+            SELECT COUNT(*) FROM logs
+            WHERE user_id=%s AND DATE(timestamp)=%s
+        """, (user_id, today))
+
+        count = cur.fetchone()[0]
+
+        if count < 3:
+            status = "pości lub nie dostarczył kompletnych danych"
+        else:
+            cur.execute("""
+                SELECT COALESCE(SUM(calories), 0)
+                FROM meals
+                WHERE user_id=%s AND DATE(timestamp)=%s
+            """, (user_id, today))
+
+            calories = cur.fetchone()[0]
+            status = f"{calories} kcal"
+
+        lines.append(f"{phone}: {status}")
+
+    cur.close()
+    conn.close()
+
+    return "\n".join(lines)
+
+
+@app.get("/send-daily-summary")
+def send_daily_summary():
+    summary = build_daily_summary()
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT phone_number FROM users")
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+
+    for (phone,) in users:
+        requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            data={
+                "From": "whatsapp:+14155238886",
+                "To": phone,
+                "Body": summary
+            },
+            auth=(sid, token)
+        )
+
+    return {"status": "summary sent"}
+
+
 # ---------------- WEBHOOK ----------------
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.form()
     data = dict(data)
 
-    phone = data.get("From")  # 👈 KEY CHANGE
+    phone = data.get("From")
     user_id = get_or_create_user(phone)
 
     num_media = int(data.get("NumMedia", 0))
@@ -272,6 +366,8 @@ async def webhook(request: Request):
                 "timestamp": datetime.now()
             })
 
+            save_log(user_id, "meal")
+
             totals = get_today_totals(user_id)
 
             reply = (
@@ -284,6 +380,7 @@ async def webhook(request: Request):
             reply = f"ERROR: {str(e)}"
 
     elif body:
+        save_log(user_id, "text")
         reply = answer_query(user_id)
 
     else:
