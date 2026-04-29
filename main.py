@@ -15,12 +15,12 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
-# ---- DB CONNECTION (SAFE PER REQUEST) ----
+# ---- DB CONNECTION ----
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
-# ---- CREATE TABLE (runs on startup) ----
+# ---- INIT TABLE ----
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
@@ -51,6 +51,27 @@ def home():
     return {"status": "running"}
 
 
+# =====================================================
+# 🔥 NEW: REMINDER ENDPOINT (CALLED BY CRON)
+# =====================================================
+@app.get("/send-reminder")
+def send_reminder():
+    ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+    AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{ACCOUNT_SID}/Messages.json"
+
+    data = {
+        "From": "whatsapp:+14155238886",
+        "To": "whatsapp:+48533913613",  # your number
+        "Body": "Siema byczq, pamiętaj o foteczkach 📸"
+    }
+
+    requests.post(url, data=data, auth=(ACCOUNT_SID, AUTH_TOKEN))
+
+    return {"status": "reminder sent"}
+
+
 # ---- SAVE MEAL ----
 def save_meal(entry):
     conn = get_conn()
@@ -74,7 +95,7 @@ def save_meal(entry):
     conn.close()
 
 
-# ---- LOAD TODAY MEALS ----
+# ---- LOAD TODAY ----
 def load_today_meals():
     conn = get_conn()
     cur = conn.cursor()
@@ -92,18 +113,17 @@ def load_today_meals():
     cur.close()
     conn.close()
 
-    meals = []
-    for r in rows:
-        meals.append({
+    return [
+        {
             "name": r[0],
             "calories": r[1],
             "protein": r[2],
             "carbs": r[3],
             "fat": r[4],
             "timestamp": r[5].isoformat()
-        })
-
-    return meals
+        }
+        for r in rows
+    ]
 
 
 # ---- TOTALS ----
@@ -121,22 +141,21 @@ def get_today_totals():
     return totals
 
 
-# ---- QUESTION DETECTION ----
+# ---- AI: detect question ----
 def is_question(text):
     response = client.responses.create(
         model="gpt-4o-mini",
         input=f"""
 Message: "{text}"
 
-Does this message ask about past meals, calories, or activity?
+Does this ask about past meals, calories, or activity?
 
-Answer ONLY:
+Answer only:
 yes
 or
 no
 """
     )
-
     return "yes" in response.output_text.lower()
 
 
@@ -159,9 +178,7 @@ def answer_query(user_text):
 
     lines.append(
         f"\nTotal: ~{total['calories']} kcal\n"
-        f"P: {total['protein']}g | "
-        f"C: {total['carbs']}g | "
-        f"F: {total['fat']}g"
+        f"P: {total['protein']}g | C: {total['carbs']}g | F: {total['fat']}g"
     )
 
     return "\n".join(lines)
@@ -180,7 +197,7 @@ def clean_json_output(text):
     return text
 
 
-# ---- AI IMAGE ANALYSIS ----
+# ---- AI: IMAGE → NUTRITION ----
 def estimate_calories(image_url):
     ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
     AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
@@ -230,7 +247,6 @@ Return ONLY JSON:
 # ---- WEBHOOK ----
 @app.post("/webhook")
 async def webhook(request: Request):
-    # ✅ Twilio sends FORM, not JSON
     data = await request.form()
     data = dict(data)
 
@@ -239,7 +255,6 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    # ---- IMAGE ----
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -275,7 +290,6 @@ async def webhook(request: Request):
             print("AI ERROR:", e)
             reply = f"ERROR: {str(e)}"
 
-    # ---- TEXT ----
     elif body:
         try:
             if is_question(body):
