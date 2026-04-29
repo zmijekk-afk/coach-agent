@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import json
 import base64
@@ -23,16 +23,16 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
-    # USERS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
         phone_number TEXT UNIQUE,
+        streak INT DEFAULT 0,
+        last_active DATE,
         created_at TIMESTAMP
     )
     """)
 
-    # MEALS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS meals (
         id SERIAL PRIMARY KEY,
@@ -47,7 +47,6 @@ def init_db():
     )
     """)
 
-    # LOGS (for counting activity)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS logs (
         id SERIAL PRIMARY KEY,
@@ -76,10 +75,10 @@ def get_or_create_user(phone):
     if row:
         user_id = row[0]
     else:
-        cur.execute(
-            "INSERT INTO users (phone_number, created_at) VALUES (%s, %s) RETURNING id",
-            (phone, datetime.now())
-        )
+        cur.execute("""
+            INSERT INTO users (phone_number, created_at)
+            VALUES (%s, %s) RETURNING id
+        """, (phone, datetime.now()))
         user_id = cur.fetchone()[0]
         conn.commit()
 
@@ -134,8 +133,7 @@ def load_today_meals(user_id):
     today = datetime.now().date()
 
     cur.execute("""
-        SELECT name, calories, protein, carbs, fat
-        FROM meals
+        SELECT name, calories FROM meals
         WHERE user_id=%s AND DATE(timestamp)=%s
     """, (user_id, today))
 
@@ -144,55 +142,80 @@ def load_today_meals(user_id):
     cur.close()
     conn.close()
 
-    return [
-        {
-            "name": r[0],
-            "calories": r[1],
-            "protein": r[2],
-            "carbs": r[3],
-            "fat": r[4]
-        }
-        for r in rows
-    ]
+    return rows
 
 
-def get_today_totals(user_id):
-    meals = load_today_meals(user_id)
+def count_logs_today(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
 
-    totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+    today = datetime.now().date()
 
-    for m in meals:
-        totals["calories"] += m["calories"]
-        totals["protein"] += m["protein"]
-        totals["carbs"] += m["carbs"]
-        totals["fat"] += m["fat"]
+    cur.execute("""
+        SELECT COUNT(*) FROM logs
+        WHERE user_id=%s AND DATE(timestamp)=%s
+    """, (user_id, today))
 
-    return totals
+    count = cur.fetchone()[0]
+
+    cur.close()
+    conn.close()
+
+    return count
 
 
-# ---------------- QUERY ----------------
-def answer_query(user_id):
-    meals = load_today_meals(user_id)
+def sum_calories_today(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
 
-    if not meals:
-        return "No meals logged today."
+    today = datetime.now().date()
 
-    lines = []
-    totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+    cur.execute("""
+        SELECT COALESCE(SUM(calories),0)
+        FROM meals
+        WHERE user_id=%s AND DATE(timestamp)=%s
+    """, (user_id, today))
 
-    for m in meals:
-        lines.append(f"- {m['name']} (~{m['calories']} kcal)")
-        totals["calories"] += m["calories"]
-        totals["protein"] += m["protein"]
-        totals["carbs"] += m["carbs"]
-        totals["fat"] += m["fat"]
+    total = cur.fetchone()[0]
 
-    lines.append(
-        f"\nTotal: {totals['calories']} kcal\n"
-        f"P: {totals['protein']}g | C: {totals['carbs']}g | F: {totals['fat']}g"
-    )
+    cur.close()
+    conn.close()
 
-    return "\n".join(lines)
+    return total
+
+
+# ---------------- STREAK ----------------
+def update_streak(user_id, eligible):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT streak, last_active FROM users WHERE id=%s
+    """, (user_id,))
+    row = cur.fetchone()
+
+    streak, last_active = row if row else (0, None)
+
+    today = datetime.now().date()
+    yesterday = today - timedelta(days=1)
+
+    if eligible:
+        if last_active == yesterday:
+            streak += 1
+        elif last_active != today:
+            streak = 1
+    else:
+        streak = 0
+
+    cur.execute("""
+        UPDATE users SET streak=%s, last_active=%s WHERE id=%s
+    """, (streak, today, user_id))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return streak
 
 
 # ---------------- AI ----------------
@@ -229,8 +252,7 @@ Return JSON:
 "fat": number
 }
 """},
-                {"type": "input_image",
-                 "image_url": data_url}
+                {"type": "input_image", "image_url": data_url}
             ]
         }]
     )
@@ -239,7 +261,58 @@ Return JSON:
     return json.loads(clean_json(raw))
 
 
-# ---------------- REMINDER ----------------
+# ---------------- SUMMARY ----------------
+def build_daily_summary():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id, phone_number FROM users")
+    users = cur.fetchall()
+
+    ranked = []
+    disqualified = []
+
+    for user_id, phone in users:
+        logs = count_logs_today(user_id)
+
+        if logs < 3:
+            update_streak(user_id, False)
+            disqualified.append(phone)
+        else:
+            score = logs * 10
+            streak = update_streak(user_id, True)
+
+            ranked.append({
+                "phone": phone,
+                "logs": logs,
+                "score": score,
+                "streak": streak
+            })
+
+    ranked.sort(key=lambda x: x["score"], reverse=True)
+
+    lines = ["🏆 Daily discipline ranking:\n"]
+
+    medals = ["🥇", "🥈", "🥉"]
+
+    for i, u in enumerate(ranked):
+        medal = medals[i] if i < 3 else "•"
+        lines.append(
+            f"{medal} {u['phone']} — {u['logs']} logs | 🔥 {u['streak']} | {u['score']} pts"
+        )
+
+    if disqualified:
+        lines.append("\n❌ Disqualified:")
+        for p in disqualified:
+            lines.append(f"{p} — pości lub nie dostarczył kompletnych danych")
+
+    cur.close()
+    conn.close()
+
+    return "\n".join(lines)
+
+
+# ---------------- REMINDERS ----------------
 @app.get("/send-reminder")
 def send_reminder():
     conn = get_conn()
@@ -265,59 +338,19 @@ def send_reminder():
             auth=(sid, token)
         )
 
-    return {"status": f"sent to {len(users)} users"}
-
-
-# ---------------- DAILY SUMMARY ----------------
-def build_daily_summary():
-    conn = get_conn()
-    cur = conn.cursor()
-
-    today = datetime.now().date()
-
-    cur.execute("SELECT id, phone_number FROM users")
-    users = cur.fetchall()
-
-    lines = ["📊 Daily summary:\n"]
-
-    for user_id, phone in users:
-
-        # Count logs
-        cur.execute("""
-            SELECT COUNT(*) FROM logs
-            WHERE user_id=%s AND DATE(timestamp)=%s
-        """, (user_id, today))
-
-        count = cur.fetchone()[0]
-
-        if count < 3:
-            status = "pości lub nie dostarczył kompletnych danych"
-        else:
-            cur.execute("""
-                SELECT COALESCE(SUM(calories), 0)
-                FROM meals
-                WHERE user_id=%s AND DATE(timestamp)=%s
-            """, (user_id, today))
-
-            calories = cur.fetchone()[0]
-            status = f"{calories} kcal"
-
-        lines.append(f"{phone}: {status}")
-
-    cur.close()
-    conn.close()
-
-    return "\n".join(lines)
+    return {"status": "reminder sent"}
 
 
 @app.get("/send-daily-summary")
-def send_daily_summary():
+def send_summary():
     summary = build_daily_summary()
 
     conn = get_conn()
     cur = conn.cursor()
+
     cur.execute("SELECT phone_number FROM users")
     users = cur.fetchall()
+
     cur.close()
     conn.close()
 
@@ -368,23 +401,17 @@ async def webhook(request: Request):
 
             save_log(user_id, "meal")
 
-            totals = get_today_totals(user_id)
-
-            reply = (
-                f"{est['name']} (~{est['calories']} kcal)\n"
-                f"P: {est['protein']}g | C: {est['carbs']}g | F: {est['fat']}g\n\n"
-                f"Today: {totals['calories']} kcal"
-            )
+            reply = f"{est['name']} (~{est['calories']} kcal)"
 
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
     elif body:
         save_log(user_id, "text")
-        reply = answer_query(user_id)
+        reply = "Logged"
 
     else:
-        reply = "Send photo or ask question"
+        reply = "Send photo or log"
 
     return Response(
         content=f"<Response><Message>{reply}</Message></Response>",
