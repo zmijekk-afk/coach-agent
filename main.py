@@ -10,29 +10,39 @@ from openai import OpenAI
 
 app = FastAPI()
 
+# ---- ENV ----
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
-# ---------------- DB ----------------
+# =====================================================
+# DB CONNECTION
+# =====================================================
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 
+# =====================================================
+# INIT DB (SELF-HEALING SCHEMA)
+# =====================================================
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    # USERS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
         phone_number TEXT UNIQUE,
-        streak INT DEFAULT 0,
-        last_active DATE,
         created_at TIMESTAMP
     )
     """)
 
+    # Add missing columns safely
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS streak INT DEFAULT 0;")
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active DATE;")
+
+    # MEALS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS meals (
         id SERIAL PRIMARY KEY,
@@ -47,6 +57,9 @@ def init_db():
     )
     """)
 
+    cur.execute("ALTER TABLE meals ADD COLUMN IF NOT EXISTS user_id INT;")
+
+    # LOGS
     cur.execute("""
     CREATE TABLE IF NOT EXISTS logs (
         id SERIAL PRIMARY KEY,
@@ -64,7 +77,9 @@ def init_db():
 init_db()
 
 
-# ---------------- USER ----------------
+# =====================================================
+# USER HANDLING
+# =====================================================
 def get_or_create_user(phone):
     conn = get_conn()
     cur = conn.cursor()
@@ -75,10 +90,10 @@ def get_or_create_user(phone):
     if row:
         user_id = row[0]
     else:
-        cur.execute("""
-            INSERT INTO users (phone_number, created_at)
-            VALUES (%s, %s) RETURNING id
-        """, (phone, datetime.now()))
+        cur.execute(
+            "INSERT INTO users (phone_number, created_at) VALUES (%s, %s) RETURNING id",
+            (phone, datetime.now())
+        )
         user_id = cur.fetchone()[0]
         conn.commit()
 
@@ -87,7 +102,9 @@ def get_or_create_user(phone):
     return user_id
 
 
-# ---------------- SAVE ----------------
+# =====================================================
+# SAVE DATA
+# =====================================================
 def save_meal(user_id, entry):
     conn = get_conn()
     cur = conn.cursor()
@@ -125,26 +142,9 @@ def save_log(user_id, log_type):
     conn.close()
 
 
-# ---------------- LOAD ----------------
-def load_today_meals(user_id):
-    conn = get_conn()
-    cur = conn.cursor()
-
-    today = datetime.now().date()
-
-    cur.execute("""
-        SELECT name, calories FROM meals
-        WHERE user_id=%s AND DATE(timestamp)=%s
-    """, (user_id, today))
-
-    rows = cur.fetchall()
-
-    cur.close()
-    conn.close()
-
-    return rows
-
-
+# =====================================================
+# DAILY METRICS
+# =====================================================
 def count_logs_today(user_id):
     conn = get_conn()
     cur = conn.cursor()
@@ -171,7 +171,7 @@ def sum_calories_today(user_id):
     today = datetime.now().date()
 
     cur.execute("""
-        SELECT COALESCE(SUM(calories),0)
+        SELECT COALESCE(SUM(calories), 0)
         FROM meals
         WHERE user_id=%s AND DATE(timestamp)=%s
     """, (user_id, today))
@@ -184,14 +184,14 @@ def sum_calories_today(user_id):
     return total
 
 
-# ---------------- STREAK ----------------
+# =====================================================
+# STREAK SYSTEM
+# =====================================================
 def update_streak(user_id, eligible):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT streak, last_active FROM users WHERE id=%s
-    """, (user_id,))
+    cur.execute("SELECT streak, last_active FROM users WHERE id=%s", (user_id,))
     row = cur.fetchone()
 
     streak, last_active = row if row else (0, None)
@@ -218,7 +218,9 @@ def update_streak(user_id, eligible):
     return streak
 
 
-# ---------------- AI ----------------
+# =====================================================
+# AI IMAGE ANALYSIS
+# =====================================================
 def clean_json(text):
     text = text.strip()
     if text.startswith("```"):
@@ -231,8 +233,10 @@ def estimate_calories(image_url):
     token = os.getenv("TWILIO_AUTH_TOKEN")
 
     res = requests.get(image_url, auth=(sid, token))
-    img64 = base64.b64encode(res.content).decode()
+    if res.status_code != 200:
+        raise Exception(f"Image download failed: {res.status_code}")
 
+    img64 = base64.b64encode(res.content).decode()
     data_url = f"data:image/jpeg;base64,{img64}"
 
     response = client.responses.create(
@@ -240,10 +244,12 @@ def estimate_calories(image_url):
         input=[{
             "role": "user",
             "content": [
-                {"type": "input_text", "text": """
-Identify food + estimate nutrition.
+                {
+                    "type": "input_text",
+                    "text": """
+Identify the food and estimate nutrition.
 
-Return JSON:
+Return ONLY JSON:
 {
 "name": "...",
 "calories": number,
@@ -251,8 +257,12 @@ Return JSON:
 "carbs": number,
 "fat": number
 }
-"""},
-                {"type": "input_image", "image_url": data_url}
+"""
+                },
+                {
+                    "type": "input_image",
+                    "image_url": data_url
+                }
             ]
         }]
     )
@@ -261,7 +271,9 @@ Return JSON:
     return json.loads(clean_json(raw))
 
 
-# ---------------- SUMMARY ----------------
+# =====================================================
+# DAILY RANKING SUMMARY
+# =====================================================
 def build_daily_summary():
     conn = get_conn()
     cur = conn.cursor()
@@ -312,7 +324,9 @@ def build_daily_summary():
     return "\n".join(lines)
 
 
-# ---------------- REMINDERS ----------------
+# =====================================================
+# REMINDER ENDPOINT
+# =====================================================
 @app.get("/send-reminder")
 def send_reminder():
     conn = get_conn()
@@ -341,8 +355,11 @@ def send_reminder():
     return {"status": "reminder sent"}
 
 
+# =====================================================
+# DAILY SUMMARY ENDPOINT
+# =====================================================
 @app.get("/send-daily-summary")
-def send_summary():
+def send_daily_summary():
     summary = build_daily_summary()
 
     conn = get_conn()
@@ -371,7 +388,9 @@ def send_summary():
     return {"status": "summary sent"}
 
 
-# ---------------- WEBHOOK ----------------
+# =====================================================
+# WEBHOOK (TWILIO)
+# =====================================================
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.form()
@@ -383,6 +402,7 @@ async def webhook(request: Request):
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
+    # IMAGE
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -406,6 +426,7 @@ async def webhook(request: Request):
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
+    # TEXT
     elif body:
         save_log(user_id, "text")
         reply = "Logged"
