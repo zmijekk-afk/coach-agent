@@ -23,7 +23,7 @@ def get_conn():
 
 
 # =====================================================
-# INIT DB (SELF-HEALING SCHEMA)
+# INIT DB (SELF-HEALING SCHEMA + NAME SUPPORT)
 # =====================================================
 def init_db():
     conn = get_conn()
@@ -34,11 +34,15 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
         phone_number TEXT UNIQUE,
+        name TEXT,
+        streak INT DEFAULT 0,
+        last_active DATE,
         created_at TIMESTAMP
     )
     """)
 
-    # Add missing columns safely
+    # Ensure columns exist (safe migrations)
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS streak INT DEFAULT 0;")
     cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_active DATE;")
 
@@ -78,22 +82,33 @@ init_db()
 
 
 # =====================================================
-# USER HANDLING
+# USER HANDLING (NOW WITH NAME)
 # =====================================================
-def get_or_create_user(phone):
+def get_or_create_user(phone, profile_name):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT id FROM users WHERE phone_number=%s", (phone,))
+    cur.execute("SELECT id, name FROM users WHERE phone_number=%s", (phone,))
     row = cur.fetchone()
 
     if row:
-        user_id = row[0]
+        user_id, existing_name = row
+
+        # update name if changed
+        if profile_name and profile_name != existing_name:
+            cur.execute(
+                "UPDATE users SET name=%s WHERE id=%s",
+                (profile_name, user_id)
+            )
+            conn.commit()
+
     else:
-        cur.execute(
-            "INSERT INTO users (phone_number, created_at) VALUES (%s, %s) RETURNING id",
-            (phone, datetime.now())
-        )
+        cur.execute("""
+            INSERT INTO users (phone_number, name, created_at)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """, (phone, profile_name, datetime.now()))
+
         user_id = cur.fetchone()[0]
         conn.commit()
 
@@ -272,30 +287,32 @@ Return ONLY JSON:
 
 
 # =====================================================
-# DAILY RANKING SUMMARY
+# DAILY RANKING SUMMARY (USES NAME)
 # =====================================================
 def build_daily_summary():
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT id, phone_number FROM users")
+    cur.execute("SELECT id, phone_number, name FROM users")
     users = cur.fetchall()
 
     ranked = []
     disqualified = []
 
-    for user_id, phone in users:
+    for user_id, phone, name in users:
+        display = name if name else phone
+
         logs = count_logs_today(user_id)
 
         if logs < 3:
             update_streak(user_id, False)
-            disqualified.append(phone)
+            disqualified.append(display)
         else:
             score = logs * 10
             streak = update_streak(user_id, True)
 
             ranked.append({
-                "phone": phone,
+                "name": display,
                 "logs": logs,
                 "score": score,
                 "streak": streak
@@ -310,7 +327,7 @@ def build_daily_summary():
     for i, u in enumerate(ranked):
         medal = medals[i] if i < 3 else "•"
         lines.append(
-            f"{medal} {u['phone']} — {u['logs']} logs | 🔥 {u['streak']} | {u['score']} pts"
+            f"{medal} {u['name']} — {u['logs']} logs | 🔥 {u['streak']} | {u['score']} pts"
         )
 
     if disqualified:
@@ -389,7 +406,7 @@ def send_daily_summary():
 
 
 # =====================================================
-# WEBHOOK (TWILIO)
+# WEBHOOK
 # =====================================================
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -397,12 +414,13 @@ async def webhook(request: Request):
     data = dict(data)
 
     phone = data.get("From")
-    user_id = get_or_create_user(phone)
+    profile_name = data.get("ProfileName", "Unknown")
+
+    user_id = get_or_create_user(phone, profile_name)
 
     num_media = int(data.get("NumMedia", 0))
     body = data.get("Body", "").lower()
 
-    # IMAGE
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -426,7 +444,6 @@ async def webhook(request: Request):
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
-    # TEXT
     elif body:
         save_log(user_id, "text")
         reply = "Logged"
