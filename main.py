@@ -1,3 +1,5 @@
+# (FULL FILE)
+
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from datetime import datetime, timedelta
@@ -8,14 +10,12 @@ import requests
 import psycopg2
 from openai import OpenAI
 
-# ✅ APP MUST BE CREATED BEFORE ANY ROUTES
 app = FastAPI()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
-# ================= DB =================
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
@@ -74,7 +74,6 @@ def init_db():
 init_db()
 
 
-# ================= USERS =================
 def get_or_create_user(phone, profile_name):
     conn = get_conn()
     cur = conn.cursor()
@@ -105,7 +104,8 @@ def get_or_create_user(phone, profile_name):
 
 
 # ================= HELPERS =================
-def get_today_meals_text(user_id):
+
+def build_summary_for_user(user_id):
     conn = get_conn()
     cur = conn.cursor()
 
@@ -125,12 +125,13 @@ def get_today_meals_text(user_id):
     if not rows:
         return "No meals logged today."
 
-    lines = []
     total = 0
+    lines = []
 
-    for r in rows:
-        lines.append(f"- {r[0]} (~{r[1]}g, {r[2]} kcal)")
-        total += r[2]
+    for name, grams, kcal in rows:
+        grams_text = f"{grams}g" if grams else "unknown weight"
+        lines.append(f"- {name} (~{grams_text}, {kcal} kcal)")
+        total += kcal
 
     lines.append(f"\nTotal: {total} kcal")
 
@@ -152,6 +153,7 @@ def set_user_name(user_id, new_name):
 
 
 # ================= AI =================
+
 def clean_json(text):
     text = text.strip()
     if text.startswith("```"):
@@ -178,7 +180,7 @@ def estimate_calories(image_url):
                 {
                     "type": "input_text",
                     "text": """
-Identify the meal and estimate portion size.
+Estimate portion size carefully.
 
 Return JSON:
 {
@@ -189,6 +191,7 @@ Return JSON:
 "carbs": number,
 "fat": number
 }
+If unsure, estimate grams anyway.
 """
                 },
                 {
@@ -200,10 +203,17 @@ Return JSON:
     )
 
     raw = response.output[0].content[0].text
-    return json.loads(clean_json(raw))
+    data = json.loads(clean_json(raw))
+
+    # fallback if missing grams
+    if not data.get("grams"):
+        data["grams"] = 100
+
+    return data
 
 
 # ================= WEBHOOK =================
+
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.form()
@@ -215,8 +225,9 @@ async def webhook(request: Request):
     user_id = get_or_create_user(phone, profile_name)
 
     num_media = int(data.get("NumMedia", 0))
-    body = data.get("Body", "").lower()
+    body = data.get("Body", "").lower().strip()
 
+    # IMAGE
     if num_media > 0:
         image_url = data.get("MediaUrl0")
 
@@ -247,14 +258,13 @@ async def webhook(request: Request):
 
             reply = (
                 f"{est['name']} (~{est['grams']}g, {est['calories']} kcal)\n"
-                f"P: {est['protein']}g | "
-                f"C: {est['carbs']}g | "
-                f"F: {est['fat']}g"
+                f"P: {est['protein']}g | C: {est['carbs']}g | F: {est['fat']}g"
             )
 
         except Exception as e:
             reply = f"ERROR: {str(e)}"
 
+    # TEXT
     elif body:
 
         if body.startswith("name "):
@@ -263,7 +273,10 @@ async def webhook(request: Request):
             reply = f"Name set to {new_name}"
 
         elif body == "me":
-            reply = get_today_meals_text(user_id)
+            reply = build_summary_for_user(user_id)
+
+        elif body == "summary":
+            reply = build_summary_for_user(user_id)
 
         else:
             reply = "Logged"
